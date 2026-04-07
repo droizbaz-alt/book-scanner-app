@@ -52,6 +52,15 @@ export default function App() {
   const [searchResults, setSearchResults] = useState([]);
   const [showManualModal, setShowManualModal] = useState(false);
 
+  // Bulk processing state
+  const [bulkStatus, setBulkStatus] = useState({ 
+    isProcessing: false, 
+    current: 0, 
+    total: 0, 
+    currentFile: '' 
+  });
+  const cancelBulkRef = useRef(false);
+
   // Digital book state
   const [libraryFilter, setLibraryFilter] = useState('all');
   const [folderFiles, setFolderFiles] = useState([]);
@@ -230,6 +239,98 @@ export default function App() {
 
   // ── Digital Book Helpers ──────────────────────────────────────────
 
+  const startBulkImport = async () => {
+    if (folderFiles.length === 0) return;
+    if (!window.confirm(`¿Quieres importar los ${folderFiles.length} libros detectados automáticamente?`)) return;
+    
+    setBulkStatus({ isProcessing: true, current: 0, total: folderFiles.length, currentFile: '' });
+    cancelBulkRef.current = false;
+    
+    const newBooksList = [];
+    const existingTitles = new Set(books.map(b => b.title + b.author + b.library));
+    
+    for (let i = 0; i < folderFiles.length; i++) {
+      if (cancelBulkRef.current) break;
+      
+      const file = folderFiles[i];
+      setBulkStatus(prev => ({ ...prev, current: i + 1, currentFile: file.name }));
+      
+      const ext = file.name.split('.').pop().toUpperCase();
+      const sizeInMB = (file.size / (1024 * 1024)).toFixed(1);
+      const cleanName = file.name
+        .replace(/\.[^/.]+$/, '')
+        .replace(/[_\-\.]+/g, ' ')
+        .replace(/\s\s+/g, ' ')
+        .trim();
+
+      let info = { 
+        title: cleanName, 
+        authors: ['Desconocido'], 
+        publisher: 'Importación Masiva', 
+        categories: ['Libro Digital'],
+        description: '' // No guardamos descripción larga para ahorrar espacio
+      };
+
+      // Intentar búsqueda rápida
+      try {
+        if (cleanName.length > 3) {
+          const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(cleanName)}&maxResults=1`);
+          const data = await res.json();
+          if (data.items && data.items.length > 0) {
+            const vol = data.items[0].volumeInfo;
+            // Solo aceptamos si el título se parece (básico)
+            if (vol.title.toLowerCase().includes(cleanName.toLowerCase().split(' ')[0])) {
+              info = {
+                ...info,
+                title: vol.title,
+                authors: vol.authors || ['Desconocido'],
+                publisher: vol.publisher || 'Desconocido',
+                categories: vol.categories || ['Digital'],
+                cover: vol.imageLinks?.thumbnail || ''
+              };
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("Error en búsqueda masiva para:", cleanName);
+      }
+
+      // Evitar duplicados
+      const authorStr = info.authors.join(', ');
+      if (!existingTitles.has(info.title + authorStr + currentLibrary)) {
+        newBooksList.push({
+          id: (Date.now() + i).toString(),
+          isbn: 'N/A',
+          title: info.title,
+          author: authorStr,
+          publisher: info.publisher,
+          genre: info.categories[0],
+          synopsis: '', // Optimizado: sin sinopsis larga
+          cover: info.cover || '',
+          library: currentLibrary,
+          type: 'digital',
+          format: ext,
+          fileSize: `${sizeInMB} MB`,
+          fileName: file.name,
+        });
+        existingTitles.add(info.title + authorStr + currentLibrary);
+      }
+
+      // Throttling: pequeño retraso para no saturar a Google (300ms)
+      await new Promise(r => setTimeout(r, 300));
+    }
+
+    if (newBooksList.length > 0) {
+      setBooks(prev => [...prev, ...newBooksList]);
+    }
+    
+    const wasCancelled = cancelBulkRef.current;
+    setBulkStatus(prev => ({ ...prev, isProcessing: false }));
+    setFolderFiles([]);
+    alert(wasCancelled ? "Importación cancelada." : `¡Importación finalizada! Se añadieron ${newBooksList.length} libros.`);
+    setActiveTab('library');
+  };
+
   const handleFolderScan = (files) => {
     const supported = Array.from(files).filter(f => {
       const ext = f.name.split('.').pop().toLowerCase();
@@ -277,16 +378,25 @@ export default function App() {
   const handleAddDigitalFile = async (file) => {
     const ext = file.name.split('.').pop().toUpperCase();
     const sizeInMB = (file.size / (1024 * 1024)).toFixed(1);
+    
+    // Limpieza avanzada del nombre: quita extensión, quita puntos, guiones, 
+    // y palabras comunes de archivos piratas o versiones (v1, x264, etc.)
     const cleanName = file.name
-      .replace(/\.[^/.]+$/, '')
-      .replace(/[_\-\.]+/g, ' ')
-      .replace(/\s+/g, ' ')
+      .replace(/\.[^/.]+$/, '') // quita extensión
+      .replace(/[_\-\.]+/g, ' ') // cambia _, - y . por espacios
+      .replace(/\s\s+/g, ' ') // quita espacios dobles
+      .replace(/\(.*\)/g, '') // quita paréntesis y lo de dentro
+      .replace(/\[.*\]/g, '') // quita corchetes y lo de dentro
       .trim();
 
     setPendingDigitalMeta({ format: ext, fileSize: `${sizeInMB} MB`, fileName: file.name });
     setManualQuery(cleanName);
     setShowManualModal(true);
-    await handleManualSearch(cleanName);
+    
+    // Solo buscamos si el nombre resultante tiene sentido
+    if (cleanName.length > 2) {
+      await handleManualSearch(cleanName);
+    }
   };
 
   const handleDrop = (e) => {
@@ -369,7 +479,7 @@ export default function App() {
       <main style={{ paddingBottom: '100px' }}>
         <AnimatePresence mode="wait">
 
-          {/* ── LIBRARY TAB ─────────────────────────────────────── */}
+          {/* ── SECCIÓN LIBRERÍA ────────────────────────────────── */}
           {activeTab === 'library' && (
             <motion.div
               key="library"
@@ -587,51 +697,94 @@ export default function App() {
                   </div>
 
                   {/* Drop / Folder zone */}
-                  <div
-                    onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-                    onDragLeave={() => setIsDragging(false)}
-                    onDrop={handleDrop}
-                    style={{
-                      border: `2px dashed ${isDragging ? 'var(--primary)' : 'var(--border)'}`,
-                      borderRadius: '16px',
-                      padding: '28px 20px',
-                      textAlign: 'center',
-                      backgroundColor: isDragging ? 'rgba(99,102,241,0.08)' : 'transparent',
-                      transition: 'all 0.2s',
-                      marginBottom: '16px',
-                    }}
-                  >
-                    <FolderOpen size={36} style={{ color: isDragging ? 'var(--primary)' : 'var(--text-muted)', marginBottom: '10px', transition: 'color 0.2s' }} />
-                    <p style={{ fontWeight: '600', marginBottom: '4px' }}>
-                      {isDragging ? 'Suelta aquí tus libros' : 'Arrastra archivos aquí'}
-                    </p>
-                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '16px' }}>
-                      PDF, EPUB, CBZ, MOBI, DJVU, AZW3
-                    </p>
-                    <button
-                      className="btn btn-primary"
-                      style={{ margin: '0 auto' }}
-                      onClick={handleSelectFolder}
+                  {!bulkStatus.isProcessing && (
+                    <div
+                      onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                      onDragLeave={() => setIsDragging(false)}
+                      onDrop={handleDrop}
+                      style={{
+                        border: `2px dashed ${isDragging ? 'var(--primary)' : 'var(--border)'}`,
+                        borderRadius: '16px',
+                        padding: '28px 20px',
+                        textAlign: 'center',
+                        backgroundColor: isDragging ? 'rgba(99,102,241,0.08)' : 'transparent',
+                        transition: 'all 0.2s',
+                        marginBottom: '16px',
+                      }}
                     >
-                      <FolderOpen size={16} /> Seleccionar carpeta
-                    </button>
+                      <FolderOpen size={36} style={{ color: isDragging ? 'var(--primary)' : 'var(--text-muted)', marginBottom: '10px', transition: 'color 0.2s' }} />
+                      <p style={{ fontWeight: '600', marginBottom: '4px' }}>
+                        {isDragging ? 'Suelta aquí tus libros' : 'Arrastra archivos aquí'}
+                      </p>
+                      <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '16px' }}>
+                        Selecciona o arrastra tu biblioteca digital completa
+                      </p>
+                      <button
+                        className="btn btn-primary"
+                        style={{ margin: '0 auto' }}
+                        onClick={handleSelectFolder}
+                      >
+                        <FolderOpen size={16} /> Seleccionar carpeta
+                      </button>
 
-                    {/* Hidden fallback file input */}
-                    <input
-                      ref={folderInputRef}
-                      type="file"
-                      multiple
-                      // eslint-disable-next-line react/no-unknown-property
-                      webkitdirectory=""
-                      accept=".pdf,.epub,.cbz,.mobi,.djvu,.azw3"
-                      onChange={(e) => handleFolderScan(e.target.files)}
-                      style={{ display: 'none' }}
-                    />
-                  </div>
+                      {/* Hidden fallback file input */}
+                      <input
+                        ref={folderInputRef}
+                        type="file"
+                        multiple
+                        // eslint-disable-next-line react/no-unknown-property
+                        webkitdirectory=""
+                        accept=".pdf,.epub,.cbz,.mobi,.djvu,.azw3"
+                        onChange={(e) => handleFolderScan(e.target.files)}
+                        style={{ display: 'none' }}
+                      />
+                    </div>
+                  )}
 
-                  {/* File list */}
-                  {folderFiles.length > 0 && (
+                  {/* Bulk Progress Bar */}
+                  {bulkStatus.isProcessing && (
+                    <div className="glass-panel" style={{ padding: '24px', marginBottom: '20px', textAlign: 'center' }}>
+                      <Loader2 size={32} className="animate-spin text-primary" style={{ margin: '0 auto 12px' }} />
+                      <h4 style={{ marginBottom: '8px' }}>Procesando Biblioteca...</h4>
+                      <div style={{ 
+                        width: '100%', height: '100%', backgroundColor: 'rgba(255,255,255,0.05)', 
+                        borderRadius: '10px', height: '12px', overflow: 'hidden', marginBottom: '12px' 
+                      }}>
+                        <div style={{ 
+                          width: `${(bulkStatus.current / bulkStatus.total) * 100}%`, 
+                          height: '100%', backgroundColor: 'var(--primary)',
+                          transition: 'width 0.3s ease'
+                        }} />
+                      </div>
+                      <p style={{ fontSize: '0.9rem', marginBottom: '4px' }}>
+                        {bulkStatus.current} de {bulkStatus.total}
+                      </p>
+                      <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {bulkStatus.currentFile}
+                      </p>
+                      <button 
+                        className="btn btn-secondary" 
+                        style={{ marginTop: '20px', color: 'var(--danger)', border: '1px solid var(--danger)' }}
+                        onClick={() => cancelBulkRef.current = true}
+                      >
+                        Cancelar Proceso
+                      </button>
+                    </div>
+                  )}
+
+                  {/* File list / Bulk Button */}
+                  {folderFiles.length > 0 && !bulkStatus.isProcessing && (
                     <div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '16px' }}>
+                        <button 
+                          className="btn btn-primary" 
+                          style={{ padding: '16px', fontSize: '1rem', background: 'linear-gradient(135deg, var(--primary), var(--accent))' }}
+                          onClick={startBulkImport}
+                        >
+                          🚀 Importar {folderFiles.length} libros (Automático)
+                        </button>
+                      </div>
+
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
                         <p style={{ fontWeight: '600', fontSize: '0.9rem' }}>
                           <MonitorDown size={15} style={{ verticalAlign: 'middle', marginRight: '4px' }} />
@@ -704,6 +857,7 @@ export default function App() {
           )}
 
           {/* ── EXPORT TAB ──────────────────────────────────────── */}
+          {/* ── SECCIÓN SINCRONIZACIÓN ────────────────────────── */}
           {activeTab === 'export' && (
             <motion.div
               key="export"
@@ -711,44 +865,60 @@ export default function App() {
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -20 }}
             >
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                <button className="btn btn-secondary" style={{ justifyContent: 'flex-start', padding: '16px' }} onClick={async () => {
-                  const { exportToExcel } = await import('./utils/exportUtils');
-                  exportToExcel(books, currentLibrary);
-                }}>
-                  <FileSpreadsheet size={20} className="text-primary" /> Exportar a Excel
-                </button>
-                <button className="btn btn-secondary" style={{ justifyContent: 'flex-start', padding: '16px' }} onClick={async () => {
-                  const { exportToPDF } = await import('./utils/exportUtils');
-                  exportToPDF(books, currentLibrary);
-                }}>
-                  <FileText size={20} className="text-primary" /> Exportar a PDF
-                </button>
-                <button className="btn btn-secondary" style={{ justifyContent: 'flex-start', padding: '16px' }} onClick={async () => {
-                  const { backupToJson } = await import('./utils/exportUtils');
-                  backupToJson(books, libraries);
-                }}>
-                  <FileJson size={20} className="text-primary" /> Copia de Seguridad
-                </button>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                {/* Bloque: PC a Móvil */}
+                <div className="glass-panel" style={{ padding: '16px', borderLeft: '4px solid var(--primary)' }}>
+                  <h3 style={{ fontSize: '1rem', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <MonitorDown size={18} className="text-primary" /> Sincronizar con el Móvil
+                  </h3>
+                  <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '16px' }}>
+                    Si has añadido libros en el PC, haz una copia aquí e impórtala en tu móvil.
+                  </p>
+                  
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    <button className="btn btn-primary" style={{ justifyContent: 'center', padding: '14px' }} onClick={async () => {
+                      const { backupToJson } = await import('./utils/exportUtils');
+                      backupToJson(books, libraries);
+                    }}>
+                      <Download size={18} /> Crear Copia de la Biblioteca (.json)
+                    </button>
+                    
+                    <div style={{ position: 'relative' }}>
+                      <input 
+                        type="file" 
+                        accept=".json" 
+                        onChange={importFromJson} 
+                        style={{ position: 'absolute', opacity: 0, width: '100%', height: '100%', cursor: 'pointer' }} 
+                      />
+                      <button className="btn btn-secondary" style={{ justifyContent: 'center', padding: '14px', width: '100%', borderStyle: 'dashed' }}>
+                        <Plus size={18} className="text-primary" /> Importar Copia en este dispositivo
+                      </button>
+                    </div>
+                  </div>
+                </div>
 
-                <div style={{ position: 'relative' }}>
-                  <input
-                    type="file"
-                    accept=".json"
-                    onChange={importFromJson}
-                    style={{ position: 'absolute', opacity: 0, width: '100%', height: '100%', cursor: 'pointer' }}
-                  />
-                  <button className="btn btn-secondary" style={{ justifyContent: 'flex-start', padding: '16px', width: '100%' }}>
-                    <Plus size={20} className="text-accent" /> Importar Copia (.json)
+                {/* Bloque: Reportes */}
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button className="btn btn-secondary" style={{ flex: 1, fontSize: '0.85rem' }} onClick={async () => {
+                    const { exportToExcel } = await import('./utils/exportUtils');
+                    exportToExcel(books, currentLibrary);
+                  }}>
+                    <FileSpreadsheet size={16} /> Excel
+                  </button>
+                  <button className="btn btn-secondary" style={{ flex: 1, fontSize: '0.85rem' }} onClick={async () => {
+                    const { exportToPDF } = await import('./utils/exportUtils');
+                    exportToPDF(books, currentLibrary);
+                  }}>
+                    <FileText size={16} /> PDF
                   </button>
                 </div>
 
-                <div style={{ marginTop: '20px' }}>
-                  <h3 style={{ fontSize: '1rem', marginBottom: '12px' }}>Mis Librerías</h3>
+                <div style={{ marginTop: '10px' }}>
+                  <h3 style={{ fontSize: '1rem', marginBottom: '12px' }}>Gestión de Librerías</h3>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                     {libraries.map(lib => (
-                      <button
-                        key={lib}
+                      <button 
+                        key={lib} 
                         className={`btn ${currentLibrary === lib ? 'btn-primary' : 'btn-secondary'}`}
                         style={{ justifyContent: 'space-between' }}
                         onClick={() => {
@@ -759,7 +929,7 @@ export default function App() {
                         {lib} {currentLibrary === lib && <ChevronRight size={16} />}
                       </button>
                     ))}
-                    <button className="btn btn-secondary" style={{ borderStyle: 'dashed' }} onClick={addLibrary}>
+                    <button className="btn btn-secondary" style={{ borderStyle: 'dashed', opacity: 0.7 }} onClick={addLibrary}>
                       <Plus size={18} /> Nueva Librería
                     </button>
                   </div>
@@ -827,7 +997,7 @@ export default function App() {
             </div>
 
             <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {searchResults.map(item => (
+              {searchResults.length > 0 && searchResults.map(item => (
                 <div
                   key={item.id}
                   className="card"
@@ -847,9 +1017,38 @@ export default function App() {
                 </div>
               ))}
 
-              {loading && <div style={{ textAlign: 'center', padding: '20px' }}>Buscando...</div>}
-              {!loading && searchResults.length === 0 && manualQuery && (
-                <div style={{ textAlign: 'center', color: 'var(--text-muted)' }}>Pulsa buscar para ver resultados</div>
+              {loading && (
+                <div style={{ textAlign: 'center', padding: '40px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px' }}>
+                  <Loader2 size={32} className="animate-spin text-primary" />
+                  <p>Buscando en Google Books...</p>
+                </div>
+              )}
+              
+              {!loading && searchResults.length === 0 && (
+                <div style={{ 
+                  textAlign: 'center', padding: '30px 20px', 
+                  backgroundColor: 'rgba(255,255,255,0.03)', 
+                  borderRadius: '12px', border: '1px dashed var(--border)' 
+                }}>
+                  <p style={{ color: 'var(--text-muted)', marginBottom: '16px' }}>
+                    No hemos encontrado información automática para este archivo.
+                  </p>
+                  <button 
+                    className="btn btn-primary" 
+                    style={{ margin: '0 auto' }}
+                    onClick={() => addBookToLibrary({
+                      title: manualQuery,
+                      authors: ['Desconocido'],
+                      publisher: 'Añadido manualmente',
+                      categories: ['Libro Digital'],
+                    })}
+                  >
+                    <Plus size={18} /> Añadir sin metadatos
+                  </button>
+                  <p style={{ fontSize: '0.75rem', marginTop: '12px', color: 'var(--text-muted)', opacity: 0.7 }}>
+                    Usa el buscador arriba para intentar otra búsqueda manual.
+                  </p>
+                </div>
               )}
             </div>
           </motion.div>
