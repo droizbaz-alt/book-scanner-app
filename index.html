@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#6366f1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>BiblioScan Pro</title>
+    <script>
+      console.log("BiblioScan Pro: Diagnostic scripts starting...");
+      window.onerror = function(msg, url, line, col, error) {
+        console.error("BiblioScan Error:", msg, "@", url, ":", line);
+        var div = document.createElement('div');
+        div.style = "position:fixed;top:0;left:0;width:100%;background:red;color:white;padding:10px;z-index:9999;font-size:12px;word-break:break-all";
+        div.innerHTML = "<strong>Error Detectado:</strong> " + msg + "<br>Archivo: " + url + ":" + line + (error ? "<br>Detalles: " + error.stack : "");
+        document.body.appendChild(div);
+      };
+      window.onunhandledrejection = function(event) {
+        console.error("BiblioScan Promise Rejection:", event.reason);
+        var div = document.createElement('div');
+        div.style = "position:fixed;bottom:0;left:0;width:100%;background:orange;color:black;padding:10px;z-index:9999;font-size:12px;word-break:break-all";
+        div.innerHTML = "<strong>Error de Promesa:</strong> " + event.reason;
+        document.body.appendChild(div);
+      };
+      function scriptLoaded() { console.log("Script principal cargado correctamente."); }
+      function scriptError(e) { 
+        console.error("Error al cargar el script principal:", e);
+        document.getElementById('root').innerHTML = "<strong>Error Crítico:</strong> No se pudo cargar el archivo principal de JavaScript. Revisa la consola o los permisos de red.";
+        document.getElementById('root').style.color = "red";
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root">Cargando BiblioScan Pro...</div>
+    <script type="module" src="/src/main.jsx" onload="scriptLoaded()" onerror="scriptError(event)"></script>
+  </body>
+</html>
