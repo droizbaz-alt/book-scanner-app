@@ -126,11 +126,60 @@ export default function App() {
     alert(`¡Libro añadido: ${info.title}!`);
   };
 
+  const searchBooks = async (query, maxResults = 5) => {
+    try {
+      const res = await fetch(`https://openlibrary.org/search.json?q=${encodeURIComponent(query)}&limit=${maxResults}`);
+      const data = await res.json();
+      if (!data.docs) return { items: [] };
+      const items = data.docs.map(doc => ({
+        id: doc.key,
+        volumeInfo: {
+          title: doc.title,
+          authors: doc.author_name || ['Desconocido'],
+          publisher: doc.publisher ? doc.publisher[0] : 'Desconocido',
+          categories: doc.subject || ['General'],
+          description: '', 
+          imageLinks: {
+            thumbnail: doc.cover_i ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg` : '',
+            smallThumbnail: doc.cover_i ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-S.jpg` : ''
+          }
+        }
+      }));
+      return { items };
+    } catch { return { items: [] }; }
+  };
+
+  const fetchBookByISBN = async (isbn) => {
+    try {
+      const res = await fetch(`https://openlibrary.org/api/books?bibkeys=ISBN:${isbn}&jscmd=data&format=json`);
+      const data = await res.json();
+      const bookData = data[`ISBN:${isbn}`];
+      if (bookData) {
+        return {
+          items: [{
+            id: bookData.key,
+            volumeInfo: {
+              title: bookData.title,
+              authors: bookData.authors ? bookData.authors.map(a => a.name) : ['Desconocido'],
+              publisher: bookData.publishers ? bookData.publishers.map(p => p.name).join(', ') : 'Desconocido',
+              categories: bookData.subjects ? bookData.subjects.map(s => s.name) : ['General'],
+              description: bookData.excerpts && bookData.excerpts.length > 0 ? bookData.excerpts[0].text : '',
+              imageLinks: {
+                thumbnail: bookData.cover ? bookData.cover.medium : '',
+                smallThumbnail: bookData.cover ? bookData.cover.small : ''
+              }
+            }
+          }]
+        };
+      }
+    } catch (e) { console.warn(e); }
+    return searchBooks(`isbn:${isbn}`, 1);
+  };
+
   const fetchBookData = async (isbn) => {
     setLoading(true);
     try {
-      const response = await fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}`);
-      const data = await response.json();
+      const data = await fetchBookByISBN(isbn);
       if (data.items && data.items.length > 0) {
         addBookToLibrary(data.items[0].volumeInfo, isbn);
       } else {
@@ -148,8 +197,7 @@ export default function App() {
     if (!query) return;
     setLoading(true);
     try {
-      const response = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=5`);
-      const data = await response.json();
+      const data = await searchBooks(query, 5);
       setSearchResults(data.items || []);
     } catch (error) {
       alert('Error en la búsqueda manual');
@@ -173,8 +221,7 @@ export default function App() {
         alert("No se pudo leer texto claro de la portada. Intenta con más luz.");
         return;
       }
-      const response = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(cleanText)}&maxResults=3`);
-      const data = await response.json();
+      const data = await searchBooks(cleanText, 3);
       if (data.items && data.items.length > 0) {
         setSearchResults(data.items);
         setShowManualModal(true);
@@ -274,8 +321,7 @@ export default function App() {
       // Intentar búsqueda rápida
       try {
         if (cleanName.length > 3) {
-          const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(cleanName)}&maxResults=1`);
-          const data = await res.json();
+          const data = await searchBooks(cleanName, 1);
           if (data.items && data.items.length > 0) {
             const vol = data.items[0].volumeInfo;
             // Solo aceptamos si el título se parece (básico)
@@ -845,8 +891,8 @@ export default function App() {
               {/* Bottom buttons (barcode / cover) */}
               {scannerMode !== 'digital' && (
                 <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
-                  <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => setShowManualModal(true)}>
-                    <Keyboard size={18} /> Manual
+                  <button className="btn btn-primary" style={{ flex: 1 }} onClick={() => setShowManualModal(true)}>
+                    <Search size={18} /> Buscar por Nombre/Autor
                   </button>
                   <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => setActiveTab('library')}>
                     Cancelar
